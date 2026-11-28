@@ -1,10 +1,10 @@
-"""ogr2ogr exports disable reading GDAL layer metadata from the database.
+"""Which ogr2ogr exports read GDAL layer metadata from the database.
 
 GDAL's PostgreSQL driver reads layer metadata from the ogr_system_tables
-schema when it exists. Nothing reads this metadata during export, and the
-runtime role may not have USAGE on that schema; passing
---config OGR_PG_ENABLE_METADATA NO avoids the lookup and its permission
-warning.
+schema when it exists, and warns when the runtime role has no USAGE on it.
+Formats that write none of that metadata pass
+--config OGR_PG_ENABLE_METADATA NO. GeoPackage, FlatGeobuf and GeoJSON carry
+it into the file, so they keep the lookup.
 """
 
 from pathlib import Path
@@ -12,23 +12,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.processing.export.ogr import run_ogr2ogr_export
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("format_key", "driver"),
-    [
-        ("kml", "KML"),
-        ("kmz", "LIBKML"),
-        ("geojson", "GeoJSON"),
-        ("gpkg", "GPKG"),
-        ("csv", "CSV"),
-        ("shp", "ESRI Shapefile"),
-        ("pmtiles", "PMTiles"),
-    ],
+from app.processing.export.ogr import (
+    _NO_LAYER_METADATA_FORMATS,
+    FORMAT_MAP,
+    run_ogr2ogr_export,
 )
-async def test_export_disables_pg_layer_metadata(tmp_path, format_key, driver):
+
+
+async def _exported_config(tmp_path, format_key: str) -> dict[str, str]:
+    """The --config options run_ogr2ogr_export passes for ``format_key``."""
     argv: list[str] = []
 
     async def _fake_exec(*args, **kwargs):
@@ -52,12 +44,31 @@ async def test_export_disables_pg_layer_metadata(tmp_path, format_key, driver):
         await run_ogr2ogr_export(
             "test_table",
             str(tmp_path / f"out.{format_key}"),
-            driver,
+            FORMAT_MAP[format_key]["driver"],
             schema="data",
             format_key=format_key,
         )
 
-    config = {
-        argv[i + 1]: argv[i + 2] for i, arg in enumerate(argv) if arg == "--config"
-    }
+    return {argv[i + 1]: argv[i + 2] for i, arg in enumerate(argv) if arg == "--config"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("format_key", ["csv", "kml", "kmz", "pmtiles", "shp"])
+async def test_export_without_layer_metadata_skips_the_lookup(tmp_path, format_key):
+    config = await _exported_config(tmp_path, format_key)
     assert config.get("OGR_PG_ENABLE_METADATA") == "NO"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("format_key", ["fgb", "geojson", "gpkg"])
+async def test_export_that_carries_layer_metadata_keeps_the_lookup(
+    tmp_path, format_key
+):
+    config = await _exported_config(tmp_path, format_key)
+    assert "OGR_PG_ENABLE_METADATA" not in config
+
+
+def test_every_ogr_format_is_placed():
+    """A new format has to be put on one side or the other."""
+    carries = set(FORMAT_MAP) - _NO_LAYER_METADATA_FORMATS
+    assert carries == {"fgb", "geojson", "gpkg"}

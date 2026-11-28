@@ -110,6 +110,11 @@ PARQUET_MEDIA_TYPE = "application/vnd.apache.parquet"
 # enforces the same bound itself.
 MAX_EXPORT_FEATURES = 5_000_000
 
+# Formats whose output is the same with or without the source layer's GDAL
+# metadata. GeoPackage and FlatGeobuf copy its items and GeoJSON replays stored
+# native data, so those keep the lookup.
+_NO_LAYER_METADATA_FORMATS = frozenset({"csv", "kml", "kmz", "pmtiles", "shp"})
+
 FORMAT_MAP: dict[str, dict[str, str]] = {
     "gpkg": {
         "driver": "GPKG",
@@ -185,12 +190,18 @@ _KML_NO_SUCH_FIELD = "x" * 64
 
 
 def _format_specific_args(format_key: str) -> list[str]:
-    """Extra ogr2ogr arguments a format needs; empty for most."""
+    """Extra ogr2ogr arguments a format needs; empty for some."""
+    args: list[str] = []
+    if format_key in _NO_LAYER_METADATA_FORMATS:
+        # GDAL's PostgreSQL driver reads layer metadata from ogr_system_tables
+        # when that schema exists, and warns when the runtime role has no
+        # USAGE on it. These formats write none of it, so the lookup is off.
+        args += ["--config", "OGR_PG_ENABLE_METADATA", "NO"]
     if format_key not in KML_FORMATS:
-        return []
+        return args
     options = [f"LIBKML_{name}_FIELD" for name in _KML_CONTROL_OPTIONS]
     options += [f"LIBKML_IMAGEPYRAMID_{name}" for name in _KML_IMAGEPYRAMID_OPTIONS]
-    args = [a for key in options for a in ("--config", key, _KML_NO_SUCH_FIELD)]
+    args += [a for key in options for a in ("--config", key, _KML_NO_SUCH_FIELD)]
     # An array written as an int SimpleField reads back as 0; a string field
     # keeps its text.
     return args + [
@@ -444,14 +455,6 @@ async def run_ogr2ogr_export(
         driver,
         output_path,
         pg_conn,
-        # GDAL's PostgreSQL driver reads layer metadata from ogr_system_tables
-        # if the schema exists. Nothing reads this metadata during export, and
-        # the runtime role may not have USAGE on that schema; disabling it
-        # avoids the lookup and its permission warning. Ingest already sets
-        # this option.
-        "--config",
-        "OGR_PG_ENABLE_METADATA",
-        "NO",
     ]
     cmd.extend(_format_specific_args(format_key))
     use_xy = xy and format_key == "csv"

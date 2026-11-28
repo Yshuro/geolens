@@ -16,6 +16,7 @@ and releases use semantic versioning.
 
 ### Fixed
 - A dataset export's `where` filter with text shaped like `%(name)s` in a quoted value or column name, such as `name LIKE '%(former)school%'`, no longer answers 500 or counts different rows when the export counts its selection or writes GeoParquet. Those steps now read the filter as written, as the other formats do. A GeoParquet export of a dataset with a column named that way no longer fails either.
+- A KML, KMZ, CSV, Shapefile or PMTiles export no longer asks the database for GDAL layer metadata, which none of those formats write. On a database that has GDAL's `ogr_system_tables` schema, the lookup logged a permission warning when the runtime role could not read it. GeoPackage, FlatGeobuf and GeoJSON exports still read that metadata, since they carry it into the file.
 
 ## [1.35.0] - 2026-11-28
 
