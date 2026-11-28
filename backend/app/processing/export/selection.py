@@ -23,6 +23,7 @@ from app.processing.export.service import (
     export_dataset,
     export_descriptor,
     read_filter_strings_as_rendered,
+    sql_for_text,
     validate_where_clause,
 )
 from app.processing.ingest.metadata import _qtable
@@ -134,10 +135,8 @@ async def _count_selected_features(
     clauses: list[str] = []
     params: dict = {"limit": _MAX_EXPORT_FEATURES + 1}
     if where is not None:
-        # The canonical AST re-render, never the caller's raw bytes. text()
-        # reads ":name" as a bind, so a colon in a validated literal (an ISO
-        # timestamp) is escaped to \: as parquet.py does.
-        safe_where = validate_where_clause(where, column_info).replace(":", "\\:")
+        # The canonical AST re-render, never the caller's raw bytes.
+        safe_where = sql_for_text(validate_where_clause(where, column_info))
         clauses.append(f"({safe_where})")
     if bbox is not None and has_geometry:
         # A crossing bbox counts with the predicate the export runs. An ordinary

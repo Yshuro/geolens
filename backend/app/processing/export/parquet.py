@@ -37,6 +37,7 @@ from app.processing.export.ogr import (
 from app.processing.export.service import (
     export_descriptor,
     read_filter_strings_as_rendered,
+    sql_for_text,
     validate_where_clause,
 )
 from app.processing.ingest.metadata import _qtable, get_column_info, probe_geom_4326
@@ -494,12 +495,7 @@ async def plan_parquet_export(
         clauses.append(bbox_where_sql(bbox))
         params.update(minx=bbox[0], miny=bbox[1], maxx=bbox[2], maxy=bbox[3])
     if safe_where is not None:
-        # SQLAlchemy text() reads ":name" as a bind; a colon inside the
-        # validated where clause (e.g. 'A:B', an ISO timestamp) would
-        # misparse. Escape to text()'s literal-colon form (\:); the bbox
-        # clause's real :minx/:miny binds are added separately, unescaped.
-        escaped_where = safe_where.replace(":", "\\:")
-        clauses.append(f"({escaped_where})")
+        clauses.append(f"({sql_for_text(safe_where)})")
     where_sql = " AND ".join(clauses) if clauses else "TRUE"
 
     # The router's feature_count cap is skipped when NULL, so count the actual
@@ -661,7 +657,7 @@ async def export_parquet(
     # positionally, so a user column sharing the WKB alias can't shadow it.
     select_parts = []
     for name in attr_names:
-        ident = '"' + name.replace('"', '""') + '"'
+        ident = sql_for_text('"' + name.replace('"', '""') + '"')
         select_parts.append(
             f"to_json({ident})::text" if name in json_columns else ident
         )

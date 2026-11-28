@@ -304,6 +304,33 @@ async def read_filter_strings_as_rendered(db: AsyncSession) -> None:
     await db.execute(text("SET LOCAL standard_conforming_strings = on"))
 
 
+_QUOTED_RUN = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
+
+
+def _compiler_patterns_escaped(match: re.Match[str]) -> str:
+    run = match.group(0)
+    if "%(" not in run and "__[" not in run:
+        return run
+    escaped = run.replace("\\", "\\\\").replace("%", "\\0025")
+    return "U&" + escaped.replace("[", "\\005B")
+
+
+def sql_for_text(sql: str) -> str:
+    """``sql`` written so ``text()`` on asyncpg compiles it back to the same SQL.
+
+    ``sql`` is a validated filter render or a quoted name, whose ``:`` and
+    ``%`` characters are all inside quotes. text() reads ``:name`` as a bind,
+    so each colon is escaped as ``\\:``. The compiler then rewrites every
+    ``%(name)s`` in the statement as a positional parameter, quoted or not,
+    with no escape for it, and does the same to ``__[POSTCOMPILE_name]`` and
+    ``__[SCHEMA_name]`` when the statement has such parameters. So a quoted
+    run holding ``%(`` or ``__[`` is written in PostgreSQL's ``U&`` form with
+    each percent as ``\\0025`` and each bracket as ``\\005B``: the same value
+    or name. A ``U&`` string needs ``read_filter_strings_as_rendered``.
+    """
+    return _QUOTED_RUN.sub(_compiler_patterns_escaped, sql).replace(":", "\\:")
+
+
 _DOWNLOAD_STEM_MAX_BYTES = 150
 
 
