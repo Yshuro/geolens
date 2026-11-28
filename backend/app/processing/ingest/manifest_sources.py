@@ -340,6 +340,11 @@ async def classify_manifest_source(
     )
 
 
+def published_title(dataset: ManifestDataset) -> str:
+    """The title an entry's job gives its dataset: its source's, else its own."""
+    return dataset.sources[0].title or dataset.title
+
+
 def manifest_job_metadata(
     dataset: ManifestDataset,
     prepared: ManifestPreparedSource,
@@ -359,7 +364,7 @@ def manifest_job_metadata(
     from app.core.url_redaction import redact_url_credentials
 
     job_metadata: dict[str, object] = {
-        "title": prepared.source.title or dataset.title,
+        "title": published_title(dataset),
         "summary": prepared.source.description or dataset.description,
         "visibility": visibility,
         "record_status": record_status,

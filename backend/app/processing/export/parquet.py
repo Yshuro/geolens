@@ -34,8 +34,12 @@ from app.processing.export.ogr import (
     bbox_where_sql,
     export_subprocess_timeout_seconds,
 )
-from app.processing.export.service import export_descriptor, validate_where_clause
-from app.processing.export.where_validator import canonical_where
+from app.processing.export.service import (
+    export_descriptor,
+    read_filter_strings_as_rendered,
+    sql_for_text,
+    validate_where_clause,
+)
 from app.processing.ingest.metadata import _qtable, get_column_info, probe_geom_4326
 
 # Rows, or approximate bytes of Python values, held before a batch is encoded
@@ -422,6 +426,9 @@ class ParquetExportPlan(NamedTuple):
     params: dict
     json_columns: frozenset[str] = frozenset()
     has_gid: bool = False
+    # Whether where_sql holds a caller's filter, whose string literals need
+    # read_filter_strings_as_rendered in each transaction that runs it.
+    filtered: bool = False
 
 
 async def plan_parquet_export(
@@ -471,8 +478,7 @@ async def plan_parquet_export(
         # Same trust boundary as the ogr2ogr -where path: AST allowlist + column
         # check (against the live columns), then interpolate the canonical
         # re-render, never the raw bytes.
-        validate_where_clause(where, live_columns)
-        safe_where = canonical_where(where)
+        safe_where = validate_where_clause(where, live_columns)
     else:
         safe_where = None
 
@@ -489,12 +495,7 @@ async def plan_parquet_export(
         clauses.append(bbox_where_sql(bbox))
         params.update(minx=bbox[0], miny=bbox[1], maxx=bbox[2], maxy=bbox[3])
     if safe_where is not None:
-        # SQLAlchemy text() reads ":name" as a bind; a colon inside the
-        # validated where clause (e.g. 'A:B', an ISO timestamp) would
-        # misparse. Escape to text()'s literal-colon form (\:); the bbox
-        # clause's real :minx/:miny binds are added separately, unescaped.
-        escaped_where = safe_where.replace(":", "\\:")
-        clauses.append(f"({escaped_where})")
+        clauses.append(f"({sql_for_text(safe_where)})")
     where_sql = " AND ".join(clauses) if clauses else "TRUE"
 
     # The router's feature_count cap is skipped when NULL, so count the actual
@@ -504,6 +505,8 @@ async def plan_parquet_export(
         f"{_qtable(table_name, schema=schema)} t "
         f"WHERE {where_sql} LIMIT :__cap) sub"
     )
+    if where is not None:
+        await read_filter_strings_as_rendered(db)
     count = (
         await db.execute(
             text(count_sql).bindparams(**params, __cap=_MAX_EXPORT_FEATURES + 1)
@@ -516,7 +519,12 @@ async def plan_parquet_export(
         )
 
     return ParquetExportPlan(
-        attr_names, where_sql, params, json_columns, "gid" in udt_names
+        attr_names,
+        where_sql,
+        params,
+        json_columns,
+        "gid" in udt_names,
+        filtered=where is not None,
     )
 
 
@@ -641,7 +649,7 @@ async def export_parquet(
         stream past the edge-proxy window with nothing else to stop it. None
         outside a request.
     """
-    attr_names, where_sql, params, json_columns, _ = plan
+    attr_names, where_sql, params, json_columns = plan[:4]
 
     # Attribute columns are selected directly (not via to_jsonb) so the async
     # driver returns native Python values and Arrow infers real types; json
@@ -649,7 +657,7 @@ async def export_parquet(
     # positionally, so a user column sharing the WKB alias can't shadow it.
     select_parts = []
     for name in attr_names:
-        ident = '"' + name.replace('"', '""') + '"'
+        ident = sql_for_text('"' + name.replace('"', '""') + '"')
         select_parts.append(
             f"to_json({ident})::text" if name in json_columns else ident
         )
@@ -672,6 +680,8 @@ async def export_parquet(
         # route releases its connection after planning and a reupload that swaps
         # the table needs ACCESS EXCLUSIVE. The wait for the lock is bounded by
         # the same budget as the stream.
+        if plan.filtered:
+            await read_filter_strings_as_rendered(db)
         await db.execute(
             text(
                 f"LOCK TABLE {_qtable(table_name, schema=schema)} IN ACCESS SHARE MODE"
