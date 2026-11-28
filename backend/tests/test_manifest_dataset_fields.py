@@ -1511,24 +1511,32 @@ async def test_attributes_need_both_capabilities_still_held_when_published(
 ):
     """Lost after queueing, either fails the replacement whole, as every
     door's recorded capability does: half a publish would replace the data
-    and drop the edits the entry asked for."""
+    and drop the edits the entry asked for. The entry sent again meanwhile
+    is refused for it, not answered for the queued job."""
     _stage_fixture()
     headers, editor = await _editor(client, test_db_session, admin_auth_header)
     key = f"attributes-revoked-{revoked.replace('_', '-')}"
     dataset_id = await _manifest_dataset(
-        test_db_session, editor, key, "private", "draft"
+        test_db_session, editor, key, "public", "published"
     )
-    entry = await _uploaded(client, headers, key, attributes=_ATTRIBUTES)
+    entry = await _uploaded(
+        client, headers, key, attributes=_ATTRIBUTES, visibility="private"
+    )
     result, task = await _queue_update(test_db_session, editor, entry)
     assert result.action == "update", result
 
     _editors_without(monkeypatch, revoked)
+    retried, _ = await _queue_update(test_db_session, editor, entry, dry_run=True)
+    assert (retried.action, retried.errors) == (
+        "error",
+        [f"Missing permission: {revoked}"],
+    ), retried
     job = await _run_update(test_db_session, result, task)
 
     assert job.user_metadata["admitted_capability"] == "upload"
     assert job.status == "failed"
     assert "can no longer modify this dataset" in job.error_message
-    assert await _record(test_db_session, dataset_id) == ("private", "draft")
+    assert await _record(test_db_session, dataset_id) == ("public", "published")
 
 
 async def test_the_publish_falls_back_when_a_key_would_open_a_dataset_made_public(

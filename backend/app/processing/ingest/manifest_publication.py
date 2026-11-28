@@ -46,9 +46,11 @@ from app.processing.ingest.manifest_dataset_fields import (
     ManifestEntryRefused,
     append_job_warning,
     check_job_capabilities,
+    job_is_refused,
     load_submitter,
     public_refused_message,
     resolve_entry_groups,
+    settle_job_groups,
     widening_kept_message,
 )
 from app.processing.ingest.manifest_schemas import ManifestDataset
@@ -220,8 +222,13 @@ async def in_flight_job_matches(
     job: IngestJob,
 ) -> bool:
     """Whether an in-flight job of an unchanged entry publishes what this
-    apply would, by the same policy and to the same groups, which ``fields``
-    then holds. A version 1 apply reuses only a version 1 job."""
+    apply would, by the same policy and to the same groups. ``fields`` then
+    holds the groups that job will share with, judged as its publish judges
+    them. A version 1 apply reuses only a version 1 job.
+
+    Raises the refusal of a group change this apply would be refused when
+    the job's publish will be refused too, and of a job the caller's roles
+    no longer cover, which its publish fails."""
     metadata = job.user_metadata or {}
     if fields is None:
         return not is_version_2(metadata)
@@ -240,7 +247,14 @@ async def in_flight_job_matches(
     try:
         await resolve_entry_groups(db, dataset, user, fields, existing)
     except ManifestEntryRefused:
-        # A group change this apply would be refused is not the job's.
+        # The job plans from the grants it was submitted over, under the
+        # credential that submitted it, so it can publish a share planned now
+        # would refuse; it isn't this entry's then.
+        by_key = bool(metadata.get(ADMITTED_PUBLISH_KEY_METADATA_KEY))
+        if by_key == is_publish_key(db) and await job_is_refused(
+            db, user, dataset, fields, existing, metadata
+        ):
+            raise
         fields.messages.clear()
         return False
     _, record_status = publication_to_catalog_fields(dataset.publication)
@@ -252,7 +266,11 @@ async def in_flight_job_matches(
     }
     if fields.groups is not None:
         effective[GROUPS_METADATA_KEY] = [str(group_id) for group_id in fields.groups]
-    return _same_policy(metadata, effective)
+    if not _same_policy(metadata, effective):
+        return False
+    await check_job_capabilities(db, user, metadata)
+    await settle_job_groups(db, user, dataset, fields, existing, metadata)
+    return True
 
 
 async def held_job_matches(
@@ -260,11 +278,17 @@ async def held_job_matches(
     held: Any,
     fields: ManifestEntryFields | None,
     effective: dict,
+    *,
+    user: Identity,
+    dataset: ManifestDataset,
+    existing: Any,
 ) -> bool:
     """Whether the held entry ``held`` answers for this apply: its job is of
     the same version and stores the publication this apply decided,
     ``effective``. Otherwise the entry is queued past the hold, as a changed
-    entry is."""
+    entry is. For a version 2 entry over ``existing``, ``fields`` then holds
+    the groups an Accept of that job leaves, judged as its publish judges
+    them."""
     if held is None:
         return False
     job = await db.get(IngestJob, held.job_id)
@@ -273,7 +297,12 @@ async def held_job_matches(
     stored = job.user_metadata or {}
     if is_version_2(stored) != (fields is not None):
         return False
-    return fields is None or _same_policy(stored, effective, _HELD_KEYS)
+    if fields is None:
+        return True
+    if not _same_policy(stored, effective, _HELD_KEYS):
+        return False
+    await settle_job_groups(db, user, dataset, fields, existing, stored)
+    return True
 
 
 async def settle_stored_publication(

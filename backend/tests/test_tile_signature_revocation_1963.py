@@ -530,6 +530,10 @@ class TestEveryPublicationStateWriterIsAccountedFor:
         writes set a request's ``ManifestEntryFields``, not a record, and narrow
         a record a create made in the same uncommitted transaction, and
         ``manifest_links.py``'s sets the level an apply result reports.
+        ``manifest_dataset_fields.py``'s attribute write clears a request's
+        ``ManifestEntryFields`` when the job it answers for will be refused,
+        and its other item write fills a copy of a queued job's metadata that
+        only predicts what that job publishes; neither reaches a record.
         """
         import pathlib
 
@@ -552,7 +556,11 @@ class TestEveryPublicationStateWriterIsAccountedFor:
             "modules/catalog/maps/service_groups.py": ["attr:visibility"],
             "modules/catalog/stories/groups.py": ["attr:visibility"],
             "modules/catalog/stories/router.py": ["attr:visibility"],
-            "processing/ingest/manifest_dataset_fields.py": ["item:visibility"],
+            "processing/ingest/manifest_dataset_fields.py": [
+                "attr:visibility",
+                "item:visibility",
+                "item:visibility",
+            ],
             "processing/ingest/manifest_links.py": ["attr:visibility"] * 4,
             "processing/ingest/manifest_publication.py": [
                 "attr:visibility",
